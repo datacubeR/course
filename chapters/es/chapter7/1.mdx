@@ -1,0 +1,38 @@
+<FrameworkSwitchCourse {fw} />
+
+# Introducción[[introduction]]
+
+<CourseFloatingBanner
+    chapter={7}
+    classNames="absolute z-10 right-0 top-0"
+/>
+
+En el [Capítulo 3](/course/chapter3), viste como hacer fine-tunning a un modelo de clasificación de texto. En este capítulo, abordaremos las siguientes tareas de PLN más comunes:
+
+- Clasificación de Tokens
+- Modelamiento de Lenguaje Enmascarado (`Masked language modeling`) (como en BERT)
+- Resumen (`Summarization`)
+- Traducción (`Translation`)
+- Pre-entrenamiento de modelamiento de causalidad de Lenguage (`Causal language modeling pretraining`) (como GPT-2)
+- Preguntas y Respuestas (Question answering)
+
+{#if fw === 'pt'}
+
+Para hacer esto, necesitarás hacer uso de todo lo que que has aprendido acerca de la API de `Trainer` y la librería 🤗 Accelerate en el [Capítulo 3](/course/chapter3), la librería 🤗 Datasets en el [Capítulo 5](/course/chapter5), y la librería 🤗 Tokenizers en el [Capítulo 6](/course/chapter6). También subiremos nuestros resultados al Model Hub, como lo hicimos en el [Capítulo 4](/course/chapter4), por lo que este es el capítulo donde unimos todo!
+
+Cada sección puede ser leída de manera independiente y mostraremos como entrenar un modelo con la API de `Trainer` o con tu propio bucle de entrenamiento, usando 🤗 Accelerate. Siéntete libre de saltarte cualquier parte y enfocarte en los que más te interesen: la API de `Trainer` es genial para hacer fine-tuning o entrenar tu modelo sin preocuparte acerca de lo que pasa por detrás, mientras que el bucle de entrenamiento con `Accelerate` te permitirá personalizar cualquier parte quieras más fácilmente.
+
+{:else}
+
+Para hacer esto, necesitarás hacer uso de todo lo que has aprendido acerca del entrenamiento de modelos con la API de Keras en el [Capítulo 3](/course/chapter3), la librería 🤗 Datasets en el [Capítulo 5](/course/chapter5), y la librería 🤗 Tokenizers en el [Capítulo 6](/course/chapter6). También subiremos nuestros resultados al Model Hub, como lo hicimos en el [Capítulo 4](/course/chapter4), por lo que este es el capítulo donde unimos todo!
+
+Cada sección se puede leer de manera independiente.
+
+{/if}
+
+
+<Tip>
+
+Si lees las secciones de manera consecutiva, notarás que tienen algo de código y prosa en común. La repetición es intencional, para permitir sumergirte (o volver más tarde) en cualquier tarea que te interese y encuentras un ejemplo funcional completo.
+
+</Tip>
