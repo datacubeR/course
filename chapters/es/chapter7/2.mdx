@@ -1,0 +1,979 @@
+<FrameworkSwitchCourse {fw} />
+
+# Clasificación de Tokens[[token-classification]]
+
+{#if fw === 'pt'}
+
+<CourseFloatingBanner chapter={7}
+  classNames="absolute z-10 right-0 top-0"
+  notebooks={[
+    {label: "Google Colab", value: "https://colab.research.google.com/github/huggingface/notebooks/blob/master/course/en/chapter7/section2_pt.ipynb"},
+    {label: "Aws Studio", value: "https://studiolab.sagemaker.aws/import/github/huggingface/notebooks/blob/master/course/en/chapter7/section2_pt.ipynb"},
+]} />
+
+{:else}
+
+<CourseFloatingBanner chapter={7}
+  classNames="absolute z-10 right-0 top-0"
+  notebooks={[
+    {label: "Google Colab", value: "https://colab.research.google.com/github/huggingface/notebooks/blob/master/course/en/chapter7/section2_tf.ipynb"},
+    {label: "Aws Studio", value: "https://studiolab.sagemaker.aws/import/github/huggingface/notebooks/blob/master/course/en/chapter7/section2_tf.ipynb"},
+]} />
+
+{/if}
+
+La primera aplicación que exploraremos en Clasificación de Tokens. Esta tarea genérica contempla cualquier problema que pueda ser formulado como "la atribución de una etiqueta a cada token de una oración" tales como:
+
+- **Reconocimiento de Entidades nombradas (Named Entity Recognition (NER))**: Encontrar identidades (tales como personas, ubicaciones, u organizaciones) en una oración. Esto se puede formular como la atribución de una etiqueta a cada token teniendo una clase por identidad o una clase para "no entidad".
+- **Etiquetado de Parte de Discurso (Part-of-speech tagging (POS))**: Marcar cada palabra en una oración en correspondencia con una parte de discurso en particular (tales como sustantivos, verbos, adjetivos, etc.).
+- **Fragmentación (Chunking)**: Encontrar los tokens que pertenecen a la misma entidad. Esta tarea (la cual se puede combinar con NER o POS) se puede formular como la atribución de una etiqueta (usualmente `B-`) a cualquiera de los tokens que estén al inicio de un fragmento, otra etiqueta (usualmente `I-`) a los tokens que están dentro de un fragmento, y una tercera etiqueta (usualmente `O-`) a los tokens que no pertenecen a ningún fragmento.
+
+<Youtube id="wVHdVlPScxA"/>
+
+Por supuesto, hay muchos otros tipos de problemas de clasificación de tokens; esos son sólo unos pocos ejemplos representativos. En esta sección, haremos fine-tuning de un modelo (BERT) en una tarea de NER, el cual luego será capaz de calcular predicciones como esta:
+
+
+<iframe src="https://course-demos-bert-finetuned-ner.hf.space" frameBorder="0" height="350" title="Gradio app" class="block dark:hidden container p-0 flex-grow space-iframe" allow="accelerometer; ambient-light-sensor; autoplay; battery; camera; document-domain; encrypted-media; fullscreen; geolocation; gyroscope; layout-animations; legacy-image-formats; magnetometer; microphone; midi; oversized-images; payment; picture-in-picture; publickey-credentials-get; sync-xhr; usb; vr ; wake-lock; xr-spatial-tracking" sandbox="allow-forms allow-modals allow-popups allow-popups-to-escape-sandbox allow-same-origin allow-scripts allow-downloads"></iframe>
+
+<a class="flex justify-center" href="/huggingface-course/bert-finetuned-ner">
+<img class="block dark:hidden lg:w-3/5" src="https://huggingface.co/datasets/huggingface-course/documentation-images/resolve/main/en/chapter7/model-eval-bert-finetuned-ner.png" alt="One-hot encoded labels for question answering."/>
+<img class="hidden dark:block lg:w-3/5" src="https://huggingface.co/datasets/huggingface-course/documentation-images/resolve/main/en/chapter7/model-eval-bert-finetuned-ner-dark.png" alt="One-hot encoded labels for question answering."/>
+</a>
+
+Puedes encontrar el modelo que entrenaremos y subiremos al Hub y revisar sus predicciones [acá](https://huggingface.co/huggingface-course/bert-finetuned-ner?text=My+name+is+Sylvain+and+I+work+at+Hugging+Face+in+Brooklyn).
+
+
+## Preparando los datos[[preparing-the-data]]
+
+Primero lo primero, necesitamos un conjunto de datos adecuado para hacer clasificación de tokens. En esta sección usaremos el [CoNLL-2003 dataset](https://huggingface.co/datasets/conll2003) el cual contiene artículos de la cadena de noticias Reuters.
+
+<Tip>
+
+💡 Mientras tu conjunto de datos consista de textos divididos en palabras con sus etiquetas correspondientes, serás capaz de adaptar los datos los procedimientos de procesamiento de datos descritros acá a tu propio conjunto de datos. Refiérete al [Capítulo 5](/course/chapter5) si necesitas recordar como cargar tus datos personalizados en un `Dataset`.
+
+</Tip>
+
+### El conjunto de datos CoNLL-2003[[the-conll-2003-dataset]]
+
+Para cargar el conjunto de datos CoNLL-2003, usamos el método `load_dataset()` de la librería 🤗 Datasets:
+
+```py
+from datasets import load_dataset
+
+raw_datasets = load_dataset("conll2003")
+```
+
+Esto descargará y almacenará el conjunto de datos, como vimos en el [Capítulo 3](/course/chapter3) para el conjunto de datos GLUE MRPC. Inspeccionando este objeto, nos muestra las columnas presentes y la separación entre los conjuntos de entrenamiento, validación y prueba:
+
+```py
+raw_datasets
+```
+
+```python out
+DatasetDict({
+    train: Dataset({
+        features: ['chunk_tags', 'id', 'ner_tags', 'pos_tags', 'tokens'],
+        num_rows: 14041
+    })
+    validation: Dataset({
+        features: ['chunk_tags', 'id', 'ner_tags', 'pos_tags', 'tokens'],
+        num_rows: 3250
+    })
+    test: Dataset({
+        features: ['chunk_tags', 'id', 'ner_tags', 'pos_tags', 'tokens'],
+        num_rows: 3453
+    })
+})
+```
+En particular, podemos ver que el conjunto de datos contiene etiquetas para las tres tareas que mencionamos anteriormente: NER, POS y fragmentación. Una gran diferencia de otros conjuntos de datos es que los textos de entradas no están presentados como oraciones o documentos, sino como listas de palabras (la última columna se llama `tokens`, pero contiene palabras en el sentido de que éstas con entradas pre-tokenizadas que aún necesitan pasar por el tokenizador para la tokenización por subpalabras).
+
+Miremos al primer elemento del conjunto de entrenamiento:
+
+```py
+raw_datasets["train"][0]["tokens"]
+```
+
+```python out
+['EU', 'rejects', 'German', 'call', 'to', 'boycott', 'British', 'lamb', '.']
+```
+
+Dado que queremos realizar reconocimiento de entidades nombradas, miraremos a las etiquetas para NER:
+
+```py
+raw_datasets["train"][0]["ner_tags"]
+```
+
+```python out
+[3, 0, 7, 0, 0, 0, 7, 0, 0]
+```
+
+Esas son las etiquetas como enteros listas para el entrenamiento, pero no son necesariamente útiles cuando queremos inspeccionar los datos. Al igual que para la clasificación de textos, podemos acceder a la correspondencia entre esos enteros y los nombres de etiquera mirando el atributo `features` de nuestro conjunto de datos:
+
+```py
+ner_feature = raw_datasets["train"].features["ner_tags"]
+ner_feature
+```
+
+```python out
+Sequence(feature=ClassLabel(num_classes=9, names=['O', 'B-PER', 'I-PER', 'B-ORG', 'I-ORG', 'B-LOC', 'I-LOC', 'B-MISC', 'I-MISC'], names_file=None, id=None), length=-1, id=None)
+```
+
+Estas columnas contienen elementos que que son secuencias de `ClassLabel`s. El tipo de elementos de la secuencia es está en el atributo `feature` de `ner_feature`, y podemos acceder la lista de nombres mirando el atributo de `names` de `feature`:
+
+```py
+label_names = ner_feature.feature.names
+label_names
+```
+
+```python out
+['O', 'B-PER', 'I-PER', 'B-ORG', 'I-ORG', 'B-LOC', 'I-LOC', 'B-MISC', 'I-MISC']
+```
+
+Ya vimos que estas etiquetas cuando profundizamos en el pipeline de `clasificación de tokens` en el [Capítulo 6](/course/chapter6/3), pero como un rápido recordatorio:
+
+- `O` significa que la palabra no corresponde a ninguna entidad.
+- `B-PER`/`I-PER` significa que la palabra corresponde al inicio de/está dentro de una entidad *persona*.
+- `B-ORG`/`I-ORG` significa que la palabra corresponde al inicio de/está dentro de una entidad *organización*.
+- `B-LOC`/`I-LOC` significa que la palabra corresponde al inicio de/está dentro de una entidad *ubicación*.
+- `B-MISC`/`I-MISC` significa que la palabra corresponde al inicio de/está dentro de una entidad *misceláneo*.
+
+Ahora decodificando las etiquetas que vimos anteriormente nos da esto:
+
+```python
+words = raw_datasets["train"][0]["tokens"]
+labels = raw_datasets["train"][0]["ner_tags"]
+line1 = ""
+line2 = ""
+for word, label in zip(words, labels):
+    full_label = label_names[label]
+    max_length = max(len(word), len(full_label))
+    line1 += word + " " * (max_length - len(word) + 1)
+    line2 += full_label + " " * (max_length - len(full_label) + 1)
+
+print(line1)
+print(line2)
+```
+
+```python out
+'EU    rejects German call to boycott British lamb .'
+'B-ORG O       B-MISC O    O  O       B-MISC  O    O'
+```
+
+Y por ejemplo mezclando las etiquetas de `B-` y `I-`, esto es lo que el mismo código nos da en el elemento de índice 4 del conjunto de entrenamiento:
+
+```python out
+'Germany \'s representative to the European Union \'s veterinary committee Werner Zwingmann said on Wednesday consumers should buy sheepmeat from countries other than Britain until the scientific advice was clearer .'
+'B-LOC   O  O              O  O   B-ORG    I-ORG O  O          O         B-PER  I-PER     O    O  O         O         O      O   O         O    O         O     O    B-LOC   O     O   O          O      O   O       O'
+```
+
+Como podemos ver, las entidades que se extienden dos palabras, como "European Union" y "Werner Zwingmann", son atribuidos a la etiqueta `B-` para la primera palabra y la etiqueta `I-` para el segundo.
+
+<Tip>
+
+✏️ **Tu turno!** Imprime las mismas dos oraciones con sus etiquetas de POS o Fragmentación.
+
+</Tip>
+
+### Processing the data[[processing-the-data]]
+
+<Youtube id="iY2AZYdZAr0"/>
+
+Como es usual, nuestros textos necesitan ser convertidos a IDs de token antes de que el modelo pueda hacer sentido de ellos. Como vimos en el [Chapter 6](/course/chapter6/), una gran diferencia en el caso de tareas de clasificación de tokens es que tenemos entradas pre-tokenizadas. Afortunadamente, la API de tokenizadores puede lidiar con eso de manera sumamente fácil; sólo necesitamos advertir al `tokenizador` con una alerta especial.
+
+Para comenzar, creemos nuestro objeto `tokenizer`. Como dijimos antes, estaremos usando un modelo pre-entrenado BERT, por lo que empezaremos descargando y almacenando el tokenizador asociado:
+
+```python
+from transformers import AutoTokenizer
+
+model_checkpoint = "bert-base-cased"
+tokenizer = AutoTokenizer.from_pretrained(model_checkpoint)
+```
+
+Puedes reemplazar el `model_checkpoint` (punto de control) con cualquier otro modelo que prefieras desde el [Hub](https://huggingface.co/models), o con una carpeta local en la cual hayas guardado un modelo pre-entrenado y un tokenizador. La única restricción es que el tokenizador necesita estar respaldado por la librería 🤗 Tokenizers, para que haya un versión "rápida" disponible. Puedes ver todas las arquitecturas que vienen con una versión rápida en [esta tabla gigante](https://huggingface.co/transformers/#supported-frameworks), y para revisar que el objeto `tokenizer` está realmente respaldado por 🤗 Tokenizers puedes mirar su atributo `is_fast`:
+
+```py
+tokenizer.is_fast
+```
+
+```python out
+True
+```
+
+Para tokenizar una entrada pre-tokenizada, podemos usar nuestro `tokenizer` como es usuar, y sólo añadir `is_split_into_words=True`:
+
+```py
+inputs = tokenizer(raw_datasets["train"][0]["tokens"], is_split_into_words=True)
+inputs.tokens()
+```
+
+```python out
+['[CLS]', 'EU', 'rejects', 'German', 'call', 'to', 'boycott', 'British', 'la', '##mb', '.', '[SEP]']
+```
+
+Como podemos ver, el tokenizador añadió los tokens especiales utilizados por el modelo (`[CLS]` al inicio y `[SEP]` al final) y dejó la mayoría de las palabras tal sin modificar. La palabra `lamb`, sin embargo, fue tokenizada en dos subpalabras, `la` y `##mb`. Esto introduce una inconsistencia entre nuestras entradas (inputs) y las etiquetas: la lista de etiquetas tiene sólo 9 elementos, mientras que nuestro input ahora tiene 12 tokens. Tomar en cuentra los tokens especiales es fácil (sabemos que están al inicio y al final), pero también necesitamos asegurarnos que alineamos todas las etiquetas con las palabras correspondientes.
+
+Afortunadamente, dado que estamos utilizando un tokenizador rápido tenemos acceso a los superpoderes de 🤗 Tokenizers, lo que significa que podemos mapear fácilmente cada token con su palabra correspondiente (como se vió en el [Capítulo 6](/course/chapter6/3)):
+
+```py
+inputs.word_ids()
+```
+
+```python out
+[None, 0, 1, 2, 3, 4, 5, 6, 7, 7, 8, None]
+```
+
+Con muy poquito trabajo, podemos expandir nuestra lista de etiquetas para emparejarlo con los tokens. La primera regla que aplicaremos es que los tokens especiales obtienen una etiqueta de `-100`. Esto es porque por defecto `-100` es un índice que es ignorado por la función de pérdida que utilizaremos (entropía cruzada (cross-entropy)). Luego, cada token obtiene la misma etiqueta a medida que el otken que empezó la palabra esté dentro, dado que son parte de la misma entidad. Para tokens dentro de una palabra pero que no están al inicio reemplazamos `B-` con `I-` (dado que el token no comienza la entidad):
+
+```python
+def align_labels_with_tokens(labels, word_ids):
+    new_labels = []
+    current_word = None
+    for word_id in word_ids:
+        if word_id != current_word:
+            # Start of a new word!
+            current_word = word_id
+            label = -100 if word_id is None else labels[word_id]
+            new_labels.append(label)
+        elif word_id is None:
+            # Special token
+            new_labels.append(-100)
+        else:
+            # Same word as previous token
+            label = labels[word_id]
+            # If the label is B-XXX we change it to I-XXX
+            if label % 2 == 1:
+                label += 1
+            new_labels.append(label)
+
+    return new_labels
+```
+
+Intentémoslo en nuestra primera oración:
+
+```py
+labels = raw_datasets["train"][0]["ner_tags"]
+word_ids = inputs.word_ids()
+print(labels)
+print(align_labels_with_tokens(labels, word_ids))
+```
+
+```python out
+[3, 0, 7, 0, 0, 0, 7, 0, 0]
+[-100, 3, 0, 7, 0, 0, 0, 7, 0, 0, 0, -100]
+```
+
+Como podemos ver, nuestra función añadió el `-100` para los dos tokens especiales al inicio y al final, y un nuevo `0` para nuestra palabra que fue separada en dos tokens.
+
+<Tip>
+
+✏️ **Tu turno!** algunos investigadores prefieren atribuir sólo una etiqueta por palabra, y asignar `-100` a los otros subtokens en la palabra dada. Esto es para evitar palabrar largas palabras que se separan en montones de subtokens que contribuyen significativamente a la pérdida. Cambia la función previa para alinear la etiquetas con los Input IDs siguiendo esta regla.
+
+</Tip>
+
+Para preprocesar nuestro conjunto de datos completo, necesitamos tokenizar todos los inputs y aplicar `align_labels_with_tokens()` sobre todas las etiquetas. Para aprovechar la velocidad de nuestro tokenizador rápido, es mejor tokenizar montones de textos al mismo tiempo, por lo que escribiremos una función que procese listas de ejemplos y el método `Dataset.map()` con la opción `batched=True`. La única diferencia con nuestro ejemplo previo es que la función `word_ids()` necesita obtener el índice del ID de palabra que queremos cuando las entradas del tokenizador son listas de textos (o en nuestro caso, listas de listas de palabras), por lo que agregamos eso también:
+
+```py
+def tokenize_and_align_labels(examples):
+    tokenized_inputs = tokenizer(
+        examples["tokens"], truncation=True, is_split_into_words=True
+    )
+    all_labels = examples["ner_tags"]
+    new_labels = []
+    for i, labels in enumerate(all_labels):
+        word_ids = tokenized_inputs.word_ids(i)
+        new_labels.append(align_labels_with_tokens(labels, word_ids))
+
+    tokenized_inputs["labels"] = new_labels
+    return tokenized_inputs
+```
+
+Nota que no hemos rellenado nuestras entradas aún, haremos eso más tarde,cuando creemos los lotes con un `data collator`.
+
+Ahora podemos aplicar todo ese preprocesamiento de una vez en las otras separaciones de nuestro conjunto de datos:
+
+```py
+tokenized_datasets = raw_datasets.map(
+    tokenize_and_align_labels,
+    batched=True,
+    remove_columns=raw_datasets["train"].column_names,
+)
+```
+
+¡Hemos hecho la parte más difícil! Ahora que los datos se han preprocesado, el entrenamiento se verá mucho más parecido a lo que hicimos en el [Capítulo 3](/course/chapter3).
+
+{#if fw === 'pt'}
+
+## Ajustar el modelo con la API de `Trainer`[[fine-tuning-the-model-with-the-trainer-api]]
+
+El código usando `Trainer` será el mismo de antes; los únicos cambios son la manera en que los datos son agrupados en un lote y la función de cálculo de la métrica.
+
+{:else}
+
+## Ajustar el modelo con Keras[[fine-tuning-the-model-with-keras]]
+
+El código usando Keras será muy similar al anterior; los únicos cambios son la manera en que los datos son agrupados en un lote y la función de cálculo de la métrica.
+
+{/if}
+
+
+### Agrupación de los Datos[[data-collation]]
+
+No podemos usar sólo un `DataCollatorWithPadding` como en el [Capítulo 3](/course/chapter3) porque eso sólo rellena las entradas (input IDs, máscara de atención (attention mask), y los IDs de tipo de token). Acá nuestras etiquetas deberían rellenarse de la misma manera que las entradas para que pudieran mantener el mismo tamaño, usando `-100` para que las predicciones correspondientes sean ignoradas en el cálculo de la pérdida.
+
+Esto se hace por medio de un [`DataCollatorForTokenClassification`](https://huggingface.co/transformers/main_classes/data_collator.html#datacollatorfortokenclassification). Al igual que el `DataCollatorWithPadding`, éste toma el `tokenizer` usado para procesar las entradas:
+
+{#if fw === 'pt'}
+
+```py
+from transformers import DataCollatorForTokenClassification
+
+data_collator = DataCollatorForTokenClassification(tokenizer=tokenizer)
+```
+
+{:else}
+
+```py
+from transformers import DataCollatorForTokenClassification
+
+data_collator = DataCollatorForTokenClassification(
+    tokenizer=tokenizer, return_tensors="tf"
+)
+```
+
+{/if}
+
+Para probar esto en unas pocas muestras, podemos llamarlo en una lista de ejemplos de nuestro conjunto de entrenamiento tokenizdo:
+
+```py
+batch = data_collator([tokenized_datasets["train"][i] for i in range(2)])
+batch["labels"]
+```
+
+```python out
+tensor([[-100,    3,    0,    7,    0,    0,    0,    7,    0,    0,    0, -100],
+        [-100,    1,    2, -100, -100, -100, -100, -100, -100, -100, -100, -100]])
+```
+
+Comparemos esto con las etiquetas apra el primer y segundo elemento de nuestro conjunto de datos:
+
+```py
+for i in range(2):
+    print(tokenized_datasets["train"][i]["labels"])
+```
+
+```python out
+[-100, 3, 0, 7, 0, 0, 0, 7, 0, 0, 0, -100]
+[-100, 1, 2, -100]
+```
+
+{#if fw === 'pt'}
+
+Como podemos ver, el segundo conjunto de etiquetas ha sido rellenado al largo del primero usando `-100`.
+
+{:else}
+
+Nuestro data collator está listo!! Ahora usemoslo para hacer un `tf.data.Dataset` con el método `to_tf_dataset()`. También puedes usar `model.prepare_tf_dataset()` para hacer esto con un poco menos de código repetitivo - verás esto en alguna de las otras secciones de este capítulo.
+
+```py
+tf_train_dataset = tokenized_datasets["train"].to_tf_dataset(
+    columns=["attention_mask", "input_ids", "labels", "token_type_ids"],
+    collate_fn=data_collator,
+    shuffle=True,
+    batch_size=16,
+)
+
+tf_eval_dataset = tokenized_datasets["validation"].to_tf_dataset(
+    columns=["attention_mask", "input_ids", "labels", "token_type_ids"],
+    collate_fn=data_collator,
+    shuffle=False,
+    batch_size=16,
+)
+```
+
+Siguiente parada: el Modelo propiamente tal.
+
+{/if}
+
+{#if fw === 'tf'}
+
+### Definiendo el modelo[[defining-the-model]]
+
+Dado que estamos trabajando en problema de clasificación de tokens, usaremos la clase `TFAutoModelForTokenClassification`. Lo principal es que al definir este modelo pasemos información acerca del número de etiquetas que tenemos. La manera más fácil de hacer esto es pasar el número con el argumento `num_labels`, pero si queremos un widget de inferencia que funcione como el que vimos en el inicio de esta sección, es mejor ajustar las correspondencias de etiquetas correctas.
+
+Ellas deberían ajustarse usando dos diccionarios, `id2label` y `label2id`, que contengan el mapeo desde el ID a la etiqueta y vice versa:
+
+```py
+id2label = {i: label for i, label in enumerate(label_names)}
+label2id = {v: k for k, v in id2label.items()}
+```
+
+Ahora podemos pasarlos al método `TFAutoModelForTokenClassification.from_pretrained()` y se ajustará la configuración del modelo, para luego ser guardado y subido de manera apropiada al Hub:
+
+```py
+from transformers import TFAutoModelForTokenClassification
+
+model = TFAutoModelForTokenClassification.from_pretrained(
+    model_checkpoint,
+    id2label=id2label,
+    label2id=label2id,
+)
+```
+
+Al igual que cuando definimos nuestro `TFAutoModelForSequenceClassification` en el [Capítulo 3](/course/chapter3), creando el modelo se emite una advertencia de que algunos pesos no se usaron (los pesos de la cabeza de pre-entrenamiento) y otros pesis son inicializados de manera aleatoria (los de la nueva cabeza de clasificación de tokens), y que este modelo debería ser entrenado. Haremos eso en un minuto, pero primero revisemos que nuestro modelo tiene el número correcto de etiquetas:
+
+```python
+model.config.num_labels
+```
+
+```python out
+9
+```
+
+<Tip warning={true}>
+
+⚠️ Si tienes un modelo con un número incorrecto de etiquetas, obtendrás un error oscuro al momento de llamar `model.fit()` más tarde. Esto puede ser molesto de depurar, por lo que asegúrate de hacer esta revisión para confirmar que tienes el número esperado de etiquetas.
+
+</Tip>
+
+### Ajuste del modelo (Fine-tuning del Modelo)[[fine-tuning-the-model]]
+
+Estamos listos para entrenar nuesto modelo! Primero tenemos que hacer un poco de orden: deberíamos registrarnos en Hugging Face y definir nuestros hiperparámetros de entrenamiento. Si estás trabajando en un notebook, hay una función para ayudarte con esto:
+
+```python
+from huggingface_hub import notebook_login
+
+notebook_login()
+```
+
+Esto mostrará un widget donde puedes ingresar tus credenciales de Hugging Face.
+
+Si es que no estás trabajando en un notebook, sólo escribe la siguiente línea en tu terminal:
+
+```bash
+huggingface-cli login
+```
+
+Luego de registrarte, podemos preparar todo lo que necesitamos para compilar nuestro modelo. 🤗 Transformers provee una función llamada `create_optimizer()` que te dará un optimizador `AdamW` con una configuración con los ajustes apropiados para el decremento de pesos (weight decay) y el decremento de la tasa de aprendizaje (Learning Rate Decay), los cuales mejorarán el rendimiento del modelo comparado con el optimizador `Adam` por defecto: 
+
+```python
+from transformers import create_optimizer
+import tensorflow as tf
+
+# Train in mixed-precision float16
+# Comment this line out if you're using a GPU that will not benefit from this
+tf.keras.mixed_precision.set_global_policy("mixed_float16")
+
+# The number of training steps is the number of samples in the dataset, divided by the batch size then multiplied
+# by the total number of epochs. Note that the tf_train_dataset here is a batched tf.data.Dataset,
+# not the original Hugging Face Dataset, so its len() is already num_samples // batch_size.
+num_epochs = 3
+num_train_steps = len(tf_train_dataset) * num_epochs
+
+optimizer, schedule = create_optimizer(
+    init_lr=2e-5,
+    num_warmup_steps=0,
+    num_train_steps=num_train_steps,
+    weight_decay_rate=0.01,
+)
+model.compile(optimizer=optimizer)
+```
+
+Notar también que no suministramos un argumento `loss` a `compile()`. Esto es porque los modelos pueden calcular la pérdida internamenta -- si tu compilas sin una pérdida y suministras tus etiquetas en el diccionario de entrada (como lo hacemos en nuestros conjuntos de datos), luego el modelo se entranará usando esas pérdidas internas, las cuales serán apropiadas para la tarea y el tipo de modelo que escogiste.
+
+A continuación, definimos `PushToHubCallback` para subir nuestro modelo al Hub durante el entrenamiento, y ajustar el modelo con ese callback:
+
+```python
+from transformers.keras_callbacks import PushToHubCallback
+
+callback = PushToHubCallback(output_dir="bert-finetuned-ner", tokenizer=tokenizer)
+
+model.fit(
+    tf_train_dataset,
+    validation_data=tf_eval_dataset,
+    callbacks=[callback],
+    epochs=num_epochs,
+)
+```
+Puedes especificar el nombre completo del repositorio al que quieras subirlo con el argumento `hub_model_id` (en particular, tendrás que usar este argumento en caso de que quieras subirlo a una organización). Por ejemplo, cuando subimos el modelo a la [organización del `huggingface-course`](https://huggingface.co/huggingface-course), agregamos `hub_model_id="huggingface-course/bert-finetuned-ner"`. Por defecto, el repositorio usado será parte de tu namespace y se nombrará como el directorio de salida utilizado, por lo que en nuestro caso será `"cool_huggingface_user/bert-finetuned-ner"`.
+
+<Tip>
+💡 Si el directorio de salida que estás usando ya existe, necesita ser una copia local del repositorio al que quieres subir. Si no lo es, obtendrás un error al llamar `model.fit()` y tendrás que utilizar un nuevo nombre.
+
+</Tip>
+
+Nota que mientras ocurre el entrenamiento, cada vez que el modelo es guardado (en este caso, cada época) se sube al Hub en segundo plano. De esta manera, serás capaz de reiniciar tu entrenamiento en otra máquina si es necesario. 
+
+En esta etapa, puedes usar un widget de inferencia en el Model Hub para probar tu modelo y compartirlo con tus amigos. Has ajustado tu modelo (fine-tuned) un modelo en una tarea de clasificación de tokens de manera exitosa -- felicitaciones! Pero, qué tan bueno es nuestro modelo en realidad? Deberíamos evaluar algunas métricas para averiguarlo. 
+
+{/if}
+
+
+### Metricas[[metrics]]
+
+{#if fw === 'pt'}
+
+Para hacer que el `Trainer` calcule la métrica para cada época, necesitaremos definir una función `compute_metrics()` que tome los arreglos de predicciones y las etiquetas, y retorne un diccionario con el nombre de las métricas y sus valores. 
+
+El framework tradicionalmente utilizado para evaluar la predicción de clasficación de tokens es [*seqeval*](https://github.com/chakki-works/seqeval). Para usar esta métrica, primero necesitamos instalar la librería *seqeval*:
+
+```py
+!pip install seqeval
+```
+
+Luego podemos cargarla utilizando la función `evaluate.load()` como lo hicimos en el [Capítulo 3](/course/chapter3):
+
+{:else}
+
+El framework tradicionalmente utilizado para evaluar la predicción de clasficación de tokens es [*seqeval*](https://github.com/chakki-works/seqeval). Para usar esta métrica, primero necesitamos instalar la librería *seqeval*:
+
+```py
+!pip install seqeval
+```
+
+Luego podemos cargarla utilizando la función `evaluate.load()` como lo hicimos en el [Chapter 3](/course/chapter3):
+
+{/if}
+
+```py
+import evaluate
+
+metric = evaluate.load("seqeval")
+```
+
+Esta métrica no se comporta como la exactitud standard (standard accuracy): en realidad tomará una lista de etiquetas como strings, no enteros, por lo que necesitará decodificar las predicciones y las etiquetas totalmente antes de pasarlas a la métrica. Veamos como funciona. Primero, obtendremos nuestras etiquetas para nuestro primer ejemplo de entrenamiento: 
+
+```py
+labels = raw_datasets["train"][0]["ner_tags"]
+labels = [label_names[i] for i in labels]
+labels
+```
+
+```python out
+['B-ORG', 'O', 'B-MISC', 'O', 'O', 'O', 'B-MISC', 'O', 'O']
+```
+
+Luego podemos crear predicciones falsas cambiando el valor del índice 2:
+
+```py
+predictions = labels.copy()
+predictions[2] = "O"
+metric.compute(predictions=[predictions], references=[labels])
+```
+
+Nota que la métrica tome una lista de predicciones (no sólo una) y una lista de etiquetas. Esta es la salida:
+
+```python out
+{'MISC': {'precision': 1.0, 'recall': 0.5, 'f1': 0.67, 'number': 2},
+ 'ORG': {'precision': 1.0, 'recall': 1.0, 'f1': 1.0, 'number': 1},
+ 'overall_precision': 1.0,
+ 'overall_recall': 0.67,
+ 'overall_f1': 0.8,
+ 'overall_accuracy': 0.89}
+```
+
+{#if fw === 'pt'}
+
+¡Esto nos devuelve un montón de información! Obtenemos la precisión, recal y el F1 Score para cada entidad separada, como también un valor general. Para el cálculo de nuestra métrica sólo queremos mantener el puntaje general, pero siéntete libre de modificar la función `compute_metrics()` para retornar todas las métricas que te gustaría reportar. 
+
+Esta función `compute_metrics()` primero toma el argmax de los logits para convertirlos a predicciones (como es usuarl, los logits y las probabilidades están en el mismo orden, por lo tanto no necesitamos aplicar la función softmax). Luego tenemos que convertir etiquetas y predicciones de enteros a strings. Removemos todos los valores donde la etiqueta es `-100`, luego pasamos los resultados al método `metric.compute()`:
+
+```py
+import numpy as np
+
+
+def compute_metrics(eval_preds):
+    logits, labels = eval_preds
+    predictions = np.argmax(logits, axis=-1)
+
+    # Remove ignored index (special tokens) and convert to labels
+    true_labels = [[label_names[l] for l in label if l != -100] for label in labels]
+    true_predictions = [
+        [label_names[p] for (p, l) in zip(prediction, label) if l != -100]
+        for prediction, label in zip(predictions, labels)
+    ]
+    all_metrics = metric.compute(predictions=true_predictions, references=true_labels)
+    return {
+        "precision": all_metrics["overall_precision"],
+        "recall": all_metrics["overall_recall"],
+        "f1": all_metrics["overall_f1"],
+        "accuracy": all_metrics["overall_accuracy"],
+    }
+```
+
+Ahora que esto está listo, estamos casi listos para definir nuestro `Trainer`. ¡Sólo necesitamos un modelo para ajustar (fine-tune)!
+
+{:else}
+
+¡Esto nos devuelve un montón de información! Obtenemos la precisión, recal y el F1 Score para cada entidad separada, como también un valor general. Ahora veamos qué ocurre si es que tratamos de usar las predicciones de nuestro modelo para calcular los puntajes reales.
+
+A Tensorflow no le gusta concatenar nuestras predicciones, porque tienen un largo de secuencia variable. Esto significa que no podemos usar `model.predict()` directamente -- pero eso no nos va a detener. Obtendremos algunas predicciones un lote a la vez y las concatenaremos en una larga lista, eliminando los tokens `-100` que indicar enmascaramiento/relleno, para luego calcular las métricas en la lista:
+
+
+```py
+import numpy as np
+
+all_predictions = []
+all_labels = []
+for batch in tf_eval_dataset:
+    logits = model.predict_on_batch(batch)["logits"]
+    labels = batch["labels"]
+    predictions = np.argmax(logits, axis=-1)
+    for prediction, label in zip(predictions, labels):
+        for predicted_idx, label_idx in zip(prediction, label):
+            if label_idx == -100:
+                continue
+            all_predictions.append(label_names[predicted_idx])
+            all_labels.append(label_names[label_idx])
+metric.compute(predictions=[all_predictions], references=[all_labels])
+```
+
+
+```python out
+{'LOC': {'precision': 0.91, 'recall': 0.92, 'f1': 0.91, 'number': 1668},
+ 'MISC': {'precision': 0.70, 'recall': 0.79, 'f1': 0.74, 'number': 702},
+ 'ORG': {'precision': 0.85, 'recall': 0.90, 'f1': 0.88, 'number': 1661},
+ 'PER': {'precision': 0.95, 'recall': 0.95, 'f1': 0.95, 'number': 1617},
+ 'overall_precision': 0.87,
+ 'overall_recall': 0.91,
+ 'overall_f1': 0.89,
+ 'overall_accuracy': 0.97}
+```
+
+¿Cómo le fue a tu modelo, comparado con el nuestro? ¡Si obtuviste números similares, tu entrenamiento fue un éxito!
+
+{/if}
+
+{#if fw === 'pt'}
+
+### Definiendo el modelo[[defining-the-model]]
+
+Dado que estamos trabajando con un problema de clasificación de tokens, usaremos la clase `AutoModelForTokenClassification`. El principal aspecto a recordar al momento de definir este modelo es pasar información acerca del número de etiquetas que tenemos. La manera más simple de hacer esto es pasar dicho número utilizando el argumento `num_labels`, pero si queremos tener un buen widget de inferencia que funcione como el que vimos al inicio de esta sección, es mejor definir las correspondencias con las etiquetas. 
+
+Esto debería definirse mediante dos diccionarios, `id2label` y `label2id`, el cual contiene el mapeo de ID a etiqueta y viceversa:
+
+```py
+id2label = {i: label for i, label in enumerate(label_names)}
+label2id = {v: k for k, v in id2label.items()}
+```
+
+Ahora basta con pasarlos al método `AutoModelForTokenClassification.from_pretrained()`, para ser definidos en la configuración del modelo y ser guardados y subidos de manera apropiada al Hub:  
+
+```py
+from transformers import AutoModelForTokenClassification
+
+model = AutoModelForTokenClassification.from_pretrained(
+    model_checkpoint,
+    id2label=id2label,
+    label2id=label2id,
+)
+```
+
+De la misma maneara como definimos nuestro `AutoModelForSequenceClassification` en el [Capítulo 3](/course/chapter3), crear el modelo envía una advertencia que algunos pesos no no fueron usados (los de la cabeza del pre-entrenamiento) y que otros están siendo inicializados de manera aleatoria (los de la nueva cabeza de clasificación), y que este modelo debería entrenar. Haremos eso en un minuto, pero primero revisemos nuevamente que nuestro modelo tenga el número correcto de etiquetas:
+
+```python
+model.config.num_labels
+```
+
+```python out
+9
+```
+
+<Tip warning={true}>
+
+⚠ Si tienes un modelo con el número de etiquetas incorrecto, obtendrás un error bastante confuso al llamar al método `Trainer.train()`. (Algo como "CUDA error: device-side assert triggered"). Esta es la causa número 1 de bugs reportados por los usuarios, por lo que asegúrate de hacer este chequeo para confirmar que tienes el número de etiquetas esperado. 
+
+</Tip>
+
+### Ajustando (Fine-tuning) el modelo[[fine-tuning-the-model]]
+
+¡Ya estamos listos para entrenar nuestro modelo! Sólo necesitamos hacer dos cosas antes de definir nuestro `Trainer`: registrarnos a Hugging Face y definir nuestros argumentos de entrenamiento. Si estás trabajando en un notebook, hay una función para ayudarte con esto: 
+
+```python
+from huggingface_hub import notebook_login
+
+notebook_login()
+```
+
+Esto mostrará un widget donde puedes ingresar tus credenciales de acceso a Hugging Face.
+
+Si no estás trabajando en una notebook, sólo escribe la siguiente línea en tu terminal:
+
+```bash
+huggingface-cli login
+```
+
+Una vez que esto está hecho, podemos definir nuestros `TrainingArguments`:
+
+```python
+from transformers import TrainingArguments
+
+args = TrainingArguments(
+    "bert-finetuned-ner",
+    evaluation_strategy="epoch",
+    save_strategy="epoch",
+    learning_rate=2e-5,
+    num_train_epochs=3,
+    weight_decay=0.01,
+    push_to_hub=True,
+)
+```
+
+Ya has visto la mayoría de esto antes: fijamos algunos hiperparámetros (como la tasa de aprendizaje, el número de épocas por el cual entrenar, y el decremento de pesos), y especificamos `push_to_hub=True` para indicar que queremos guardar el modelo y evaluar lo al final de cada época, y que queremos subir los resultados al Model Hub. Nota que puedes especificar el nombre del repositorio al que quieres subirlo con el argumento `hub_model_id` (en particular, tendrás que usar este argumento para subirlo a una organización). Por ejemplo, cuando subimos el modelo a la [organización del `huggingface-course`](https://huggingface.co/huggingface-course) agregamos `hub_model_id="huggingface-course/bert-finetuned-ner"` a `TrainingArguments`. Por defecto, el repositorio usado será parte de tu namespace y se nombrará como el directorio de salida utilizado, por lo que en nuestro caso será `"sgugger/bert-finetuned-ner"`.
+
+<Tip>
+💡 Si el directorio de salida que estás usando ya existe, necesita ser un clon local del repositorio al que quieres subir. En caso de no serlo, obtendrás un error al momento de definir tu `Trainer` y tendrás que definir un nuevo nombre.
+
+</Tip>
+
+Finalmente, sólo pasamos todo al `Trainer` e iniciamos el entrenamiento:
+
+```python
+from transformers import Trainer
+
+trainer = Trainer(
+    model=model,
+    args=args,
+    train_dataset=tokenized_datasets["train"],
+    eval_dataset=tokenized_datasets["validation"],
+    data_collator=data_collator,
+    compute_metrics=compute_metrics,
+    tokenizer=tokenizer,
+)
+trainer.train()
+```
+
+Nota que mientras ocurre el entrenamiento, cada vez que el modelo se guarda (en este caso, cada época) es subido al Hub en segundo plano. De esta manera podrás reiniciar tu entrenamiento en otra máquina si es necesario. 
+
+Una vez que se completa el entrenamiento, usamos el método `push_to_hub()` para asegurar que subamos la versión más reciente del modelo:
+
+```py
+trainer.push_to_hub(commit_message="Training complete")
+```
+
+Este comando retorna la URL del commit que hicimos, en caso que quieras inspeccionarla:
+
+```python out
+'https://huggingface.co/sgugger/bert-finetuned-ner/commit/26ab21e5b1568f9afeccdaed2d8715f571d786ed'
+```
+
+El `Trainer` también genera el bosquejo de una carta de modelo con todos los resultados de la evaluación y la sube. En esta etapa, puedes utilizar un widget de inferencia en el Model Hub para probar tu modelo y compartilo con tus amigos. ¡Has ajustado (fine-tuned) un modelo en una tarea de clasificación de tokens -- felicitaciones!
+
+Si quieres profundizar de manera un poco más profunda en el ciclo de entrenamiento (training loop), ahora mostraremos cómo hacer lo mismo utilizando 🤗 Accelerate.
+
+## Ciclo de Entrenamiento a personalizado[[a-custom-training-loop]]
+
+Ahora echemos una mirada al ciclo de entrenamiento completo, para que puedas personalizar las partes que necesites. Se parecerá mucho a lo que hicimos en el [Capítulo 3](/course/chapter3/4), con algunos cambios para la evaluación. 
+
+### Preparando todo para el entrenamiento[[preparing-everything-for-training]]
+
+Primero necesitamos construir los `DataLoader`s desde nuestros conjuntos de datos. Reusaremos nuestro `data_collator` como una `collate_fn` y mezclaremos el conjunto de entrenamiento, pero no el conjunto de validación:
+
+```py
+from torch.utils.data import DataLoader
+
+train_dataloader = DataLoader(
+    tokenized_datasets["train"],
+    shuffle=True,
+    collate_fn=data_collator,
+    batch_size=8,
+)
+eval_dataloader = DataLoader(
+    tokenized_datasets["validation"], collate_fn=data_collator, batch_size=8
+)
+```
+
+A continuación reinstanciamos nuestro modelo, para asegurarnos que no estamos continuando el ajuste (fine-tuning) de antes, sino que comenzando de un modelo BERT pre-entrenado nuevamente:
+
+```py
+model = AutoModelForTokenClassification.from_pretrained(
+    model_checkpoint,
+    id2label=id2label,
+    label2id=label2id,
+)
+```
+
+Luego necesitaremos un optimizador. Usaremos el clásico `AdamW`, el cual es como un `Adam`, pero con una correccion en cómo el decremento de pesos es aplicado: 
+
+```py
+from torch.optim import AdamW
+
+optimizer = AdamW(model.parameters(), lr=2e-5)
+```
+
+Una vez que tenemos todos estos objetos, podemos enviarlos al método `accelerator.prepare()`:
+
+```py
+from accelerate import Accelerator
+
+accelerator = Accelerator()
+model, optimizer, train_dataloader, eval_dataloader = accelerator.prepare(
+    model, optimizer, train_dataloader, eval_dataloader
+)
+```
+
+<Tip>
+🚨 Si estás entrenando en una TPU, necesitarás mover todo el código comenzando desde la celda anterior en una función dedicada de entrenamiento. Mira el [Capítulo 3](/course/chapter3) para más detalles. 
+
+</Tip>
+
+Ahora que hemos enviado nuestro `train_dataloader` al `accelerator.prepare()`, podemos usar su largo para calcular el número de pasos de entrenamiento. Recuerda que debemos siempre hacer esto luego de preparar el dataloader, ya que el método cambiará su largo. Usamos un clásico programa lineal variando el learning rate hasta 0:
+
+```py
+from transformers import get_scheduler
+
+num_train_epochs = 3
+num_update_steps_per_epoch = len(train_dataloader)
+num_training_steps = num_train_epochs * num_update_steps_per_epoch
+
+lr_scheduler = get_scheduler(
+    "linear",
+    optimizer=optimizer,
+    num_warmup_steps=0,
+    num_training_steps=num_training_steps,
+)
+```
+
+Finalmente, para subir nuestro modelo al Hub, necesitamos crear un objeto `Repository` in una carpeta. Primero nos conectamos a Hugging Face, si es que no estás conectado aún. Determinaremos el nombre del repositorio desde el ID del modelo que queremos darle a nuestro model (siéntete libre de reemplazar el `repo_name` con el nombre que tú quieras; sólo necesita contener tu nombre de usuario, que es lo que la función `get_full_repo_name() hace): 
+
+```py
+from huggingface_hub import Repository, get_full_repo_name
+
+model_name = "bert-finetuned-ner-accelerate"
+repo_name = get_full_repo_name(model_name)
+repo_name
+```
+
+```python out
+'sgugger/bert-finetuned-ner-accelerate'
+```
+
+Luego podemos clonar el ese repositorio en una carpeta local. Si ya existe, esta carpeta local debería ser un clon existente del repositorio con el que estás trabajando:
+
+```py
+output_dir = "bert-finetuned-ner-accelerate"
+repo = Repository(output_dir, clone_from=repo_name)
+```
+
+Ahora podemos subir todo lo que guardemos en `output_dir` llamando el método `repo.push_to_hub()`. Esto nos ayudará a subir los modelos intermedios al final de cada época. 
+
+### Ciclo de Entrenamiento[[training-loop]]
+
+Ahora estamos listos para escribir el ciclo de entrenamiento completo. Para simplificar la parte de evaluación, definimos esta función `postprocess()` que toma las predicciones y etiquetas y las convierte a listas de strings, como nuestro objeto `metric` espera:
+
+```py
+def postprocess(predictions, labels):
+    predictions = predictions.detach().cpu().clone().numpy()
+    labels = labels.detach().cpu().clone().numpy()
+
+    # Remove ignored index (special tokens) and convert to labels
+    true_labels = [[label_names[l] for l in label if l != -100] for label in labels]
+    true_predictions = [
+        [label_names[p] for (p, l) in zip(prediction, label) if l != -100]
+        for prediction, label in zip(predictions, labels)
+    ]
+    return true_labels, true_predictions
+```
+
+Luego podemos escribir el ciclo de entrenamiento. Después de definir una barra de progreso para seguir cómo va el entrenamiento, el ciclo tiene tres partes: 
+
+- El entrenamiento propiamente tal, el cuál es la clásica iteración sobre el `train_dataloader`, pasada hacia adelante a través del modelo, luego pasada hacia atrás y el paso del optimizador. 
+- La evaluación, en la cual hay una novedad luego de obtener las salidas de nuestro modelo en un lote: dado que dos procesos han rellenado las entradas y las etiquetas a formas diferentes, necesitamos usar el `accelerator.pad_across_processes()` para hacer que las predicciones y las etiquetas tengan la misma forma que tenían antes de llamar al método `gather()`. Si no hacemos esto, la evaluación fallará o quedará colgada por siempre. Luego enviamos los resultados a `metric.add_batch()` y llamamos a `metric.compute()` una vez que el ciclo de evaluación se acaba. 
+- Guardar y subir el modelo, donde primero guardamos el modelo y el tokenizador, luego llamamos `repo.push_to_hub()`. Nota que usamos el argumento `blocking=False` para decirle al 🤗 Hub que suba en un proceso asíncrono. De esta manera, el entrenamiento continúa de manera normal y esta (larga) instrucción se ejecuta en segundo plano. 
+
+Acá está el código completo para el ciclo de entrenamiento: 
+
+```py
+from tqdm.auto import tqdm
+import torch
+
+progress_bar = tqdm(range(num_training_steps))
+
+for epoch in range(num_train_epochs):
+    # Training
+    model.train()
+    for batch in train_dataloader:
+        outputs = model(**batch)
+        loss = outputs.loss
+        accelerator.backward(loss)
+
+        optimizer.step()
+        lr_scheduler.step()
+        optimizer.zero_grad()
+        progress_bar.update(1)
+
+    # Evaluation
+    model.eval()
+    for batch in eval_dataloader:
+        with torch.no_grad():
+            outputs = model(**batch)
+
+        predictions = outputs.logits.argmax(dim=-1)
+        labels = batch["labels"]
+
+        # Necessary to pad predictions and labels for being gathered
+        predictions = accelerator.pad_across_processes(predictions, dim=1, pad_index=-100)
+        labels = accelerator.pad_across_processes(labels, dim=1, pad_index=-100)
+
+        predictions_gathered = accelerator.gather(predictions)
+        labels_gathered = accelerator.gather(labels)
+
+        true_predictions, true_labels = postprocess(predictions_gathered, labels_gathered)
+        metric.add_batch(predictions=true_predictions, references=true_labels)
+
+    results = metric.compute()
+    print(
+        f"epoch {epoch}:",
+        {
+            key: results[f"overall_{key}"]
+            for key in ["precision", "recall", "f1", "accuracy"]
+        },
+    )
+
+    # Save and upload
+    accelerator.wait_for_everyone()
+    unwrapped_model = accelerator.unwrap_model(model)
+    unwrapped_model.save_pretrained(output_dir, save_function=accelerator.save)
+    if accelerator.is_main_process:
+        tokenizer.save_pretrained(output_dir)
+        repo.push_to_hub(
+            commit_message=f"Training in progress epoch {epoch}", blocking=False
+        )
+```
+
+En caso que este sea la primera vez que ves un modelo guarddo con 🤗 Accelerate, tomemos un momento para inspeccionar las 3 líneas de código que le permiten funcionar: 
+
+```py
+accelerator.wait_for_everyone()
+unwrapped_model = accelerator.unwrap_model(model)
+unwrapped_model.save_pretrained(output_dir, save_function=accelerator.save)
+```
+
+La primera línea es auto-explicativa: le dice a todos los procesos que esperen hasta que todos estén en esa etapa antes de continuar. Esto es para asegurar que tenemos el mismo model en cada proceso antes de guardar. Luego tomemos el `unwrapped_model`, el cual es el modelo base que definimos. El método `accelerator.prepare()` cambia el modelo para trabajar en entrenamiento distribuido, por lo que ya no tendrá el método `save_pretrained()`; el `accelerator.unwrap_model()` deshace ese paso. Finalmente, llamamos a `save_pretrained()` pero haciendo que dicho método use `accelerator.save()` en vez de `torch.save()`.
+
+Una vez que esto esté listo, deberías tener un modelo que produce resultados bastante similares a los que se obtuvieron con el `Trainer`. Puedes chequear el modelo que entrenamos usando este código en [*huggingface-course/bert-finetuned-ner-accelerate*](https://huggingface.co/huggingface-course/bert-finetuned-ner-accelerate). Y si quieres probar cualquier modificación al ciclo de entrenamiento, puedes implementar dichos cambios editando el código mostrado arriba. 
+
+{/if}
+
+## Usando el modelo ajustado (fine-tuned)[[using-the-fine-tuned-model]]
+
+Ya te hemos mostrado cómo puedes usar el modelo ajustado (fine-tuned model) en el Hub con el widget de inferencia. Para usarlo localmente en un `pipeline`, sólo tienes que especificar el identificador propio del modelo: 
+
+```py
+from transformers import pipeline
+
+# Replace this with your own checkpoint
+model_checkpoint = "huggingface-course/bert-finetuned-ner"
+token_classifier = pipeline(
+    "token-classification", model=model_checkpoint, aggregation_strategy="simple"
+)
+token_classifier("My name is Sylvain and I work at Hugging Face in Brooklyn.")
+```
+
+```python out
+[{'entity_group': 'PER', 'score': 0.9988506, 'word': 'Sylvain', 'start': 11, 'end': 18},
+ {'entity_group': 'ORG', 'score': 0.9647625, 'word': 'Hugging Face', 'start': 33, 'end': 45},
+ {'entity_group': 'LOC', 'score': 0.9986118, 'word': 'Brooklyn', 'start': 49, 'end': 57}]
+```
+
+¡Genial! ¡Nuestro modelo está funcionando tan bien cómo el el modelo por defecto para este pipeline!
+Great! Our model is working as well as the default one for this pipeline!
